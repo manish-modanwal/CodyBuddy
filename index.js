@@ -4,31 +4,24 @@ const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const axios = require('axios'); // We need axios for the compiler API
+const axios = require('axios'); 
 const path = require('path');
 const Room = require('./models/Room');
 const Code = require('./models/Code');
-// Load environment variables from .env file
+const Snapshot= require('./models/Snapshot');
 dotenv.config();
 
-// --- 1. Import Mongoose Models ---
-// Import the schemas you created in the models folder
 
-// const Code = require('./models/Code');
-
-
-// --- 2. INITIALIZE APP & SERVER ---
 const app = express();
 const server = http.createServer(app);
 
 // Use middleware to parse JSON and URL-encoded bodies
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cors()); // Use CORS middleware to allow cross-origin requests
+app.use(cors()); 
 
 // --- 3. CONNECT TO MONGODB ---
-// Connect to MongoDB using the connection string from environment variables
-// Note: useUnifiedTopology and useNewUrlParser are no longer needed in Mongoose 6+
+
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => {
         console.log('Connected to MongoDB');
@@ -36,6 +29,7 @@ mongoose.connect(process.env.MONGODB_URI)
     .catch((err) => {
         console.error('Error connecting to MongoDB:', err);
     });
+
 
 // --- 4. CONFIGURE SOCKET.IO SERVER ---
 const io = new Server(server, {
@@ -46,9 +40,14 @@ const io = new Server(server, {
     },
 });
 
+
+
+
 // --- 5. HANDLE SOCKET.IO CONNECTIONS & EVENTS ---
 io.on('connection', (socket) => {
     console.log(`A user connected with Id: ${socket.id}`);
+
+
 
     // --- A. Handle 'joinRoom' event when a user joins a room ---
     socket.on('joinRoom', async ({ roomId, userName }) => {
@@ -85,6 +84,8 @@ io.on('connection', (socket) => {
         }
     });
 
+
+
     // --- B. Handle 'code-change' event for live sync ---
     socket.on('code-change', ({ roomId, code, language }) => {
         // Broadcast the code change to all other users in the same room
@@ -100,11 +101,18 @@ io.on('connection', (socket) => {
         ).catch(err => console.error('Error saving code snapshot:', err));
     });
 
+
+
+
     // --- C. Handle 'language-change' event ---
     socket.on('language-change', ({ roomId, language }) => {
         // Broadcast the language change to all other users
         socket.to(roomId).emit('language-change', { language });
     });
+
+
+
+
 
     // --- D. Handle 'run-code' event (Compiler API Integration with Judge0) ---
     socket.on('run-code', async ({ code, languageId }) => {
@@ -162,6 +170,64 @@ io.on('connection', (socket) => {
             socket.emit('code-output', { output: 'Error running code. Please check your code or server logs.' });
         }
     });
+    
+
+       // --- E. Handle 'save-snapshot' event ---
+    socket.on('save-snapshot', async ({ roomId, code, userName }) => {
+        try {
+            // Create a new snapshot document in the database
+            const newSnapshot = new Snapshot({ roomId, content: code, userName });
+            await newSnapshot.save();
+            
+            console.log(`Snapshot saved for room ${roomId} by ${userName}`);
+
+            // You can emit a success message back to the sender
+            socket.emit('snapshot-saved', { message: 'Snapshot saved successfully!' });
+        } catch (error) {
+            console.error('Error saving snapshot:', error);
+            socket.emit('snapshot-error', { message: 'Failed to save snapshot.' });
+        }
+    });
+
+    // --- F. Handle 'get-snapshots' event ---
+    socket.on('get-snapshots', async ({ roomId }) => {
+        try {
+            // Find all snapshots for the given room, sorted by most recent first
+            const snapshots = await Snapshot.find({ roomId }).sort({ timestamp: -1 });
+
+            // Send the list of snapshots back to the user who requested it
+            socket.emit('snapshots-list', { snapshots });
+        } catch (error) {
+            console.error('Error fetching snapshots:', error);
+            socket.emit('snapshots-error', { message: 'Failed to fetch snapshots.' });
+        }
+    });
+
+    // --- G. Handle 'revert-to-snapshot' event ---
+    socket.on('revert-to-snapshot', async ({ roomId, snapshotId }) => {
+        try {
+            // Find the specific snapshot by its ID
+            const snapshot = await Snapshot.findById(snapshotId);
+
+            if (snapshot) {
+                // Broadcast the code from the snapshot to everyone in the room
+                io.to(roomId).emit('code-change', { code: snapshot.content });
+                console.log(`Room ${roomId} reverted to snapshot: ${snapshotId}`);
+
+                // You can also save this reverted code as the new latest version in your Code model
+                await Code.findOneAndUpdate(
+                    { roomId }, 
+                    { content: snapshot.content }, 
+                    { upsert: true }
+                );
+            }
+        } catch (error) {
+            console.error('Error reverting to snapshot:', error);
+        }
+    });
+
+
+
 
     // --- E. Handle 'disconnect' event when a user leaves ---
     socket.on('disconnecting', () => {
